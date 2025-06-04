@@ -187,10 +187,6 @@ Contributions are welcome! Please feel free to submit issues, feature requests, 
 4. Test thoroughly
 5. Submit a pull request
 
-## License
-
-This project is licensed under the MIT License. See the LICENSE file for details.
-
 ## Acknowledgments
 
 - NVIDIA for the Cosmos-Reason1-7B model
