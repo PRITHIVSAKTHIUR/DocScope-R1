@@ -54,6 +54,15 @@ model_z = Qwen2_5_VLForConditionalGeneration.from_pretrained(
     torch_dtype=torch.float16
 ).to(device).eval()
 
+# Load visionOCR
+MODEL_ID_V = "prithivMLmods/visionOCR-3B-061125"
+processor_v = AutoProcessor.from_pretrained(MODEL_ID_V, trust_remote_code=True)
+model_v = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+    MODEL_ID_V,
+    trust_remote_code=True,
+    torch_dtype=torch.float16
+).to(device).eval()
+
 def downsample_video(video_path):
     """
     Downsamples the video to evenly spaced frames.
@@ -94,6 +103,9 @@ def generate_image(model_name: str, text: str, image: Image.Image,
     elif model_name == "Captioner-7B":
         processor = processor_z
         model = model_z
+    elif model_name == "visionOCR-3B":
+        processor = processor_v
+        model = model_v
     else:
         yield "Invalid model selected."
         return
@@ -147,6 +159,9 @@ def generate_video(model_name: str, text: str, video_path: str,
     elif model_name == "Captioner-7B":
         processor = processor_z
         model = model_z
+    elif model_name == "visionOCR-3B":
+        processor = processor_v
+        model = model_v
     else:
         yield "Invalid model selected."
         return
@@ -244,7 +259,7 @@ with gr.Blocks(css=css, theme="bethecloud/storj_theme") as demo:
         with gr.Column():
             output = gr.Textbox(label="Output", interactive=False, lines=2, scale=2)
             model_choice = gr.Radio(
-                choices=["Cosmos-Reason1-7B", "docscopeOCR-7B-050425-exp", "Captioner-7B"],
+                choices=["Cosmos-Reason1-7B", "docscopeOCR-7B-050425-exp", "Captioner-7B", "visionOCR-3B"],
                 label="Select Model",
                 value="Cosmos-Reason1-7B"
             )
