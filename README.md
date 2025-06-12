@@ -27,6 +27,11 @@ A powerful multi-modal AI application that combines three state-of-the-art visio
 - **Best for**: Generating comprehensive descriptions for text-to-image training data
 - **Model**: `Ertugrul/Qwen2.5-VL-7B-Captioner-Relaxed`
 
+### 4. visionOCR-3B-061125
+- **Purpose**: Detailed image OCR and description
+- **Best for**: Generating comprehensive structured inference for the image 
+- **Model**: `prithivMLmods/visionOCR-3B-061125`
+
 ## Installation
 
 ### Prerequisites
