@@ -93,6 +93,7 @@ def generate_image(model_name: str, text: str, image: Image.Image,
                    repetition_penalty: float = 1.2):
     """
     Generates responses using the selected model for image input.
+    Yields raw text and Markdown-formatted text.
     """
     if model_name == "Cosmos-Reason1-7B":
         processor = processor_m
@@ -100,18 +101,18 @@ def generate_image(model_name: str, text: str, image: Image.Image,
     elif model_name == "docscopeOCR-7B-050425-exp":
         processor = processor_x
         model = model_x
-    elif model_name == "Captioner-7B":
+    elif model_name == "Captioner-7B-Qwen2.5VL":
         processor = processor_z
         model = model_z
     elif model_name == "visionOCR-3B":
         processor = processor_v
         model = model_v
     else:
-        yield "Invalid model selected."
+        yield "Invalid model selected.", "Invalid model selected."
         return
 
     if image is None:
-        yield "Please upload an image."
+        yield "Please upload an image.", "Please upload an image."
         return
 
     messages = [{
@@ -138,7 +139,7 @@ def generate_image(model_name: str, text: str, image: Image.Image,
     for new_text in streamer:
         buffer += new_text
         time.sleep(0.01)
-        yield buffer
+        yield buffer, buffer
 
 @spaces.GPU
 def generate_video(model_name: str, text: str, video_path: str,
@@ -149,6 +150,7 @@ def generate_video(model_name: str, text: str, video_path: str,
                    repetition_penalty: float = 1.2):
     """
     Generates responses using the selected model for video input.
+    Yields raw text and Markdown-formatted text.
     """
     if model_name == "Cosmos-Reason1-7B":
         processor = processor_m
@@ -156,18 +158,18 @@ def generate_video(model_name: str, text: str, video_path: str,
     elif model_name == "docscopeOCR-7B-050425-exp":
         processor = processor_x
         model = model_x
-    elif model_name == "Captioner-7B":
+    elif model_name == "Captioner-7B-Qwen2.5VL":
         processor = processor_z
         model = model_z
     elif model_name == "visionOCR-3B":
         processor = processor_v
         model = model_v
     else:
-        yield "Invalid model selected."
+        yield "Invalid model selected.", "Invalid model selected."
         return
 
     if video_path is None:
-        yield "Please upload a video."
+        yield "Please upload a video.", "Please upload a video."
         return
 
     frames = downsample_video(video_path)
@@ -205,7 +207,7 @@ def generate_video(model_name: str, text: str, video_path: str,
     for new_text in streamer:
         buffer += new_text
         time.sleep(0.01)
-        yield buffer
+        yield buffer, buffer
 
 # Define examples for image and video inference
 image_examples = [
@@ -226,11 +228,16 @@ css = """
 .submit-btn:hover {
     background-color: #3498db !important;
 }
+.canvas-output {
+    border: 2px solid #4682B4;
+    border-radius: 10px;
+    padding: 20px;
+}
 """
 
 # Create the Gradio Interface
 with gr.Blocks(css=css, theme="bethecloud/storj_theme") as demo:
-    gr.Markdown("# **DocScope-R1**")
+    gr.Markdown("# **[DocScope R1](https://huggingface.co/collections/prithivMLmods/multimodal-implementations-67c9982ea04b39f0608badb0)**")
     with gr.Row():
         with gr.Column():
             with gr.Tabs():
@@ -250,34 +257,43 @@ with gr.Blocks(css=css, theme="bethecloud/storj_theme") as demo:
                         examples=video_examples,
                         inputs=[video_query, video_upload]
                     )
+                    
             with gr.Accordion("Advanced options", open=False):
                 max_new_tokens = gr.Slider(label="Max new tokens", minimum=1, maximum=MAX_MAX_NEW_TOKENS, step=1, value=DEFAULT_MAX_NEW_TOKENS)
                 temperature = gr.Slider(label="Temperature", minimum=0.1, maximum=4.0, step=0.1, value=0.6)
                 top_p = gr.Slider(label="Top-p (nucleus sampling)", minimum=0.05, maximum=1.0, step=0.05, value=0.9)
                 top_k = gr.Slider(label="Top-k", minimum=1, maximum=1000, step=1, value=50)
                 repetition_penalty = gr.Slider(label="Repetition penalty", minimum=1.0, maximum=2.0, step=0.05, value=1.2)
+                
         with gr.Column():
-            output = gr.Textbox(label="Output", interactive=False, lines=2, scale=2)
+            with gr.Column(elem_classes="canvas-output"):
+                gr.Markdown("## Output")
+                raw_output = gr.Textbox(label="Raw Output Stream", interactive=False, lines=2)
+                
+                with gr.Accordion("(Result.md)", open=False):
+                    markdown_output = gr.Markdown()
+                    
             model_choice = gr.Radio(
-                choices=["Cosmos-Reason1-7B", "docscopeOCR-7B-050425-exp", "Captioner-7B", "visionOCR-3B"],
+                choices=["Cosmos-Reason1-7B", "docscopeOCR-7B-050425-exp", "Captioner-7B-Qwen2.5VL", "visionOCR-3B"],
                 label="Select Model",
                 value="Cosmos-Reason1-7B"
             )
-            
-            gr.Markdown("**Model Info**")
-            gr.Markdown("⤷ [Cosmos-Reason1-7B](https://huggingface.co/nvidia/Cosmos-Reason1-7B): understand physical common sense and generate appropriate embodied decisions.")
-            gr.Markdown("⤷ [docscopeOCR-7B-050425-exp](https://huggingface.co/prithivMLmods/docscopeOCR-7B-050425-exp): optimized for document-level optical character recognition, long-context vision-language understanding.")
-            gr.Markdown("⤷ [Captioner-Relaxed-7B](https://huggingface.co/Ertugrul/Qwen2.5-VL-7B-Captioner-Relaxed): build with hand-curated dataset for text-to-image models, providing significantly more detailed descriptions or captions of given images.")
+            gr.Markdown("**Model Info 💻** | [Report Bug](https://huggingface.co/spaces/prithivMLmods/DocScope-R1/discussions)")
+            gr.Markdown("> [Cosmos-Reason1-7B](https://huggingface.co/nvidia/Cosmos-Reason1-7B): understand physical common sense and generate appropriate embodied decisions.")
+            gr.Markdown("> [docscopeOCR-7B-050425-exp](https://huggingface.co/prithivMLmods/docscopeOCR-7B-050425-exp): optimized for document-level optical character recognition, long-context vision-language understanding.")
+            gr.Markdown("> [Captioner-Relaxed-7B](https://huggingface.co/Ertugrul/Qwen2.5-VL-7B-Captioner-Relaxed): build with hand-curated dataset for text-to-image models, providing significantly more detailed descriptions or captions of given images.")
+            gr.Markdown("> [visionOCR-3B](https://huggingface.co/prithivMLmods/visionOCR-3B-061125): visionocr-3b-061125 model is a fine-tuned version of qwen2.5-vl-3b-instruct, optimized for document-level optical character recognition (ocr), long-context vision-language understanding.")
+            gr.Markdown(">⚠️note: all the models in space are not guaranteed to perform well in video inference use cases.") 
             
     image_submit.click(
         fn=generate_image,
         inputs=[model_choice, image_query, image_upload, max_new_tokens, temperature, top_p, top_k, repetition_penalty],
-        outputs=output
+        outputs=[raw_output, markdown_output]
     )
     video_submit.click(
         fn=generate_video,
         inputs=[model_choice, video_query, video_upload, max_new_tokens, temperature, top_p, top_k, repetition_penalty],
-        outputs=output
+        outputs=[raw_output, markdown_output]
     )
 
 if __name__ == "__main__":
