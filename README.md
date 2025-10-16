@@ -1,4 +1,6 @@
-# DocScope-R1
+# **DocScope-R1**
+
+<img width="1787" height="1231" alt="Screenshot 2025-10-16 at 11-27-20 DocScope-R1 - a Hugging Face Space by prithivMLmods" src="https://github.com/user-attachments/assets/aa748f51-ea87-4ecc-ac7b-c4b6a59875e3" />
 
 A powerful multi-modal AI application that combines three state-of-the-art vision-language models for comprehensive image and video analysis. DocScope-R1 provides OCR capabilities, detailed scene understanding, and video content analysis through an intuitive Gradio interface.
 
