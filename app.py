@@ -103,6 +103,7 @@ MODEL_ID_M = "nvidia/Cosmos-Reason1-7B"
 processor_m = AutoProcessor.from_pretrained(MODEL_ID_M, trust_remote_code=True)
 model_m = Qwen2_5_VLForConditionalGeneration.from_pretrained(
     MODEL_ID_M,
+    attn_implementation="flash_attention_2",
     trust_remote_code=True,
     torch_dtype=torch.float16
 ).to(device).eval()
@@ -112,6 +113,7 @@ MODEL_ID_X = "prithivMLmods/docscopeOCR-7B-050425-exp"
 processor_x = AutoProcessor.from_pretrained(MODEL_ID_X, trust_remote_code=True)
 model_x = Qwen2_5_VLForConditionalGeneration.from_pretrained(
     MODEL_ID_X,
+    attn_implementation="flash_attention_2",
     trust_remote_code=True,
     torch_dtype=torch.float16
 ).to(device).eval()
@@ -121,6 +123,7 @@ MODEL_ID_Z = "Ertugrul/Qwen2.5-VL-7B-Captioner-Relaxed"
 processor_z = AutoProcessor.from_pretrained(MODEL_ID_Z, trust_remote_code=True)
 model_z = Qwen2_5_VLForConditionalGeneration.from_pretrained(
     MODEL_ID_Z,
+    attn_implementation="flash_attention_2",
     trust_remote_code=True,
     torch_dtype=torch.float16
 ).to(device).eval()
@@ -130,6 +133,7 @@ MODEL_ID_V = "prithivMLmods/visionOCR-3B-061125"
 processor_v = AutoProcessor.from_pretrained(MODEL_ID_V, trust_remote_code=True)
 model_v = Qwen2_5_VLForConditionalGeneration.from_pretrained(
     MODEL_ID_V,
+    attn_implementation="flash_attention_2",
     trust_remote_code=True,
     torch_dtype=torch.float16
 ).to(device).eval()
@@ -293,7 +297,7 @@ css = """
 """
 
 # Create the Gradio Interface
-with gr.Blocks(css=css, theme=steel_blue_theme) as demo:
+with gr.Blocks() as demo:
     gr.Markdown("# **DocScope R1**", elem_id="main-title")
     with gr.Row():
         with gr.Column(scale=2):
@@ -318,7 +322,7 @@ with gr.Blocks(css=css, theme=steel_blue_theme) as demo:
                 
         with gr.Column(scale=3):
             gr.Markdown("## Output", elem_id="output-title")
-            raw_output = gr.Textbox(label="Raw Output Stream", interactive=False, lines=11, show_copy_button=True)
+            raw_output = gr.Textbox(label="Raw Output Stream", interactive=True, lines=11)
             with gr.Accordion("(Result.md)", open=False):
                 markdown_output = gr.Markdown()
                     
@@ -340,4 +344,4 @@ with gr.Blocks(css=css, theme=steel_blue_theme) as demo:
     )
 
 if __name__ == "__main__":
-    demo.queue(max_size=30).launch(mcp_server=True, ssr_mode=False, show_error=True)
+    demo.queue(max_size=30).launch(css=css, theme=steel_blue_theme, mcp_server=True, ssr_mode=False, show_error=True)
