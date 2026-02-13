@@ -1,8 +1,14 @@
 # **DocScope-R1**
 
-<img width="1787" height="1231" alt="Screenshot 2025-10-16 at 11-27-20 DocScope-R1 - a Hugging Face Space by prithivMLmods" src="https://github.com/user-attachments/assets/aa748f51-ea87-4ecc-ac7b-c4b6a59875e3" />
+> [!note]
+HF Demo: https://huggingface.co/spaces/prithivMLmods/DocScope-R1
 
 A powerful multi-modal AI application that combines three state-of-the-art vision-language models for comprehensive image and video analysis. DocScope-R1 provides OCR capabilities, detailed scene understanding, and video content analysis through an intuitive Gradio interface.
+
+<img width="1787" height="1231" alt="Screenshot 2025-10-16 at 11-27-20 DocScope-R1 - a Hugging Face Space by prithivMLmods" src="https://github.com/user-attachments/assets/aa748f51-ea87-4ecc-ac7b-c4b6a59875e3" />
+
+> [!important] 
+note: remove kernels and flash_attn3 implementation if you are using it on *non-hopper* architecture gpus.
 
 ## Features
 
@@ -46,13 +52,24 @@ A powerful multi-modal AI application that combines three state-of-the-art visio
 ### Dependencies
 
 ```bash
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-pip install transformers
-pip install gradio
-pip install spaces
-pip install opencv-python
-pip install pillow
-pip install numpy
+git+https://github.com/huggingface/transformers.git@v4.57.6
+git+https://github.com/huggingface/accelerate.git
+git+https://github.com/huggingface/peft.git
+transformers-stream-generator
+huggingface_hub
+qwen-vl-utils
+sentencepiece
+opencv-python
+torch==2.8.0
+torchvision
+matplotlib
+requests
+kernels
+hf_xet
+spaces
+pillow
+gradio # - gradio@6.3.0
+av
 ```
 
 ### Clone Repository
