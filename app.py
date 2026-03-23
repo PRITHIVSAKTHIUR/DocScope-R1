@@ -67,13 +67,18 @@ MODEL_MAP = {
     "Captioner-7B-Qwen2.5VL": (processor_z, model_z),
     "visionOCR-3B": (processor_v, model_v),
 }
-
 MODEL_CHOICES = list(MODEL_MAP.keys())
 
 image_examples = [
     {"query": "Perform OCR on the text in the image.", "media": "images/1.jpg", "model": "docscopeOCR-7B-050425-exp"},
     {"query": "Explain the scene in detail.", "media": "images/2.jpg", "model": "Cosmos-Reason1-7B"},
 ]
+
+
+def select_model(model_name: str):
+    if model_name not in MODEL_MAP:
+        raise ValueError("Invalid model selected.")
+    return MODEL_MAP[model_name]
 
 
 def pil_to_data_url(img: Image.Image, fmt="PNG"):
@@ -134,22 +139,25 @@ EXAMPLE_CARDS_HTML = build_example_cards_html()
 
 def load_example_data(idx_str):
     try:
-        idx = int(float(idx_str))
+        idx = int(str(idx_str).strip())
     except Exception:
-        return json.dumps({"status": "error", "message": "Invalid example index"})
+        return gr.update(value="")
+
     if idx < 0 or idx >= len(image_examples):
-        return json.dumps({"status": "error", "message": "Example index out of range"})
+        return gr.update(value="")
+
     ex = image_examples[idx]
     media_b64 = file_to_data_url(ex["media"])
     if not media_b64:
-        return json.dumps({"status": "error", "message": "Could not load example image"})
-    return json.dumps({
+        return gr.update(value=json.dumps({"status": "error", "message": "Could not load example image"}))
+
+    return gr.update(value=json.dumps({
         "status": "ok",
         "query": ex["query"],
         "media": media_b64,
         "model": ex["model"],
         "name": os.path.basename(ex["media"]),
-    })
+    }))
 
 
 def b64_to_pil(b64_str):
@@ -166,88 +174,132 @@ def b64_to_pil(b64_str):
         return None
 
 
-def calc_timeout_image(model_name, text, image, max_new_tokens, temperature, top_p, top_k, repetition_penalty, gpu_timeout):
+def calc_timeout_generic(*args, **kwargs):
+    gpu_timeout = kwargs.get("gpu_timeout", None)
+    if gpu_timeout is None and args:
+        gpu_timeout = args[-1]
     try:
         return int(gpu_timeout)
     except Exception:
         return 60
 
 
-@spaces.GPU(duration=calc_timeout_image)
+@spaces.GPU(duration=calc_timeout_generic)
 def generate_image(model_name, text, image, max_new_tokens=1024, temperature=0.6, top_p=0.9, top_k=50, repetition_penalty=1.2, gpu_timeout=60):
-    if not model_name or model_name not in MODEL_MAP:
-        raise gr.Error("Please select a valid model.")
-    if image is None:
-        raise gr.Error("Please upload an image.")
-    if not text or not str(text).strip():
-        raise gr.Error("Please enter your instruction.")
-    if len(str(text)) > MAX_INPUT_TOKEN_LENGTH * 8:
-        raise gr.Error("Query is too long. Please shorten your input.")
+    try:
+        if not model_name or model_name not in MODEL_MAP:
+            yield "[ERROR] Please select a valid model."
+            return
+        if image is None:
+            yield "[ERROR] Please upload an image."
+            return
+        if not text or not str(text).strip():
+            yield "[ERROR] Please enter your instruction."
+            return
+        if len(str(text)) > MAX_INPUT_TOKEN_LENGTH * 8:
+            yield "[ERROR] Query is too long. Please shorten your input."
+            return
 
-    processor, model = MODEL_MAP[model_name]
+        processor, model = select_model(model_name)
 
-    messages = [{
-        "role": "user",
-        "content": [
-            {"type": "image"},
-            {"type": "text", "text": text},
-        ]
-    }]
+        messages = [{
+            "role": "user",
+            "content": [
+                {"type": "image"},
+                {"type": "text", "text": text},
+            ]
+        }]
 
-    prompt_full = processor.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True
-    )
+        prompt_full = processor.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True
+        )
 
-    inputs = processor(
-        text=[prompt_full],
-        images=[image],
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=MAX_INPUT_TOKEN_LENGTH
-    ).to(device)
+        inputs = processor(
+            text=[prompt_full],
+            images=[image],
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=MAX_INPUT_TOKEN_LENGTH
+        ).to(device)
 
-    streamer = TextIteratorStreamer(processor, skip_prompt=True, skip_special_tokens=True)
-    generation_kwargs = {
-        **inputs,
-        "streamer": streamer,
-        "max_new_tokens": int(max_new_tokens),
-        "do_sample": True,
-        "temperature": float(temperature),
-        "top_p": float(top_p),
-        "top_k": int(top_k),
-        "repetition_penalty": float(repetition_penalty),
-    }
+        streamer = TextIteratorStreamer(
+            processor.tokenizer if hasattr(processor, "tokenizer") else processor,
+            skip_prompt=True,
+            skip_special_tokens=True
+        )
 
-    thread = Thread(target=model.generate, kwargs=generation_kwargs)
-    thread.start()
+        generation_error = {"error": None}
 
-    buffer = ""
-    for new_text in streamer:
-        buffer += new_text.replace("<|im_end|>", "")
-        time.sleep(0.01)
-        yield buffer
+        generation_kwargs = {
+            **inputs,
+            "streamer": streamer,
+            "max_new_tokens": int(max_new_tokens),
+            "do_sample": True,
+            "temperature": float(temperature),
+            "top_p": float(top_p),
+            "top_k": int(top_k),
+            "repetition_penalty": float(repetition_penalty),
+        }
 
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+        def _run_generation():
+            try:
+                model.generate(**generation_kwargs)
+            except Exception as e:
+                generation_error["error"] = e
+                try:
+                    streamer.end()
+                except Exception:
+                    pass
+
+        thread = Thread(target=_run_generation, daemon=True)
+        thread.start()
+
+        buffer = ""
+        for new_text in streamer:
+            buffer += new_text.replace("<|im_end|>", "")
+            time.sleep(0.01)
+            yield buffer
+
+        thread.join(timeout=1.0)
+
+        if generation_error["error"] is not None:
+            err_msg = f"[ERROR] Inference failed: {str(generation_error['error'])}"
+            if buffer.strip():
+                yield buffer + "\n\n" + err_msg
+            else:
+                yield err_msg
+            return
+
+        if not buffer.strip():
+            yield "[ERROR] No output was generated."
+
+    except Exception as e:
+        yield f"[ERROR] {str(e)}"
+    finally:
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
-def run_inference(model_name, text, image_b64, max_new_tokens_v, temperature_v, top_p_v, top_k_v, repetition_penalty_v, gpu_timeout_v):
-    image = b64_to_pil(image_b64)
-    yield from generate_image(
-        model_name=model_name,
-        text=text,
-        image=image,
-        max_new_tokens=max_new_tokens_v,
-        temperature=temperature_v,
-        top_p=top_p_v,
-        top_k=top_k_v,
-        repetition_penalty=repetition_penalty_v,
-        gpu_timeout=gpu_timeout_v,
-    )
+def run_router(model_name, text, image_b64, max_new_tokens_v, temperature_v, top_p_v, top_k_v, repetition_penalty_v, gpu_timeout_v):
+    try:
+        image = b64_to_pil(image_b64)
+        yield from generate_image(
+            model_name=model_name,
+            text=text,
+            image=image,
+            max_new_tokens=max_new_tokens_v,
+            temperature=temperature_v,
+            top_p=top_p_v,
+            top_k=top_k_v,
+            repetition_penalty=repetition_penalty_v,
+            gpu_timeout=gpu_timeout_v,
+        )
+    except Exception as e:
+        yield f"[ERROR] {str(e)}"
 
 
 def noop():
@@ -275,7 +327,7 @@ footer{display:none!important}
 
 .app-shell{
     background:#18181b;border:1px solid #27272a;border-radius:16px;
-    margin:12px auto;max-width:1400px;overflow:hidden;
+    margin:12px auto;max-width:1450px;overflow:hidden;
     box-shadow:0 25px 50px -12px rgba(0,0,0,.6),0 0 0 1px rgba(255,255,255,.03);
 }
 .app-header{
@@ -315,23 +367,19 @@ footer{display:none!important}
 
 .app-main-row{display:flex;gap:0;flex:1;overflow:hidden}
 .app-main-left{flex:1;display:flex;flex-direction:column;min-width:0;border-right:1px solid #27272a}
-.app-main-right{width:470px;display:flex;flex-direction:column;flex-shrink:0;background:#18181b}
+.app-main-right{width:500px;display:flex;flex-direction:column;flex-shrink:0;background:#18181b}
 
 #media-drop-zone{
-    position:relative;background:#09090b;height:440px;min-height:440px;max-height:440px;
-    overflow:hidden;
+    position:relative;background:#09090b;height:440px;min-height:440px;max-height:440px;overflow:hidden;
 }
 #media-drop-zone.drag-over{outline:2px solid #FF1493;outline-offset:-2px;background:rgba(255,20,147,.04)}
 .upload-prompt-modern{
-    position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
-    padding:20px;z-index:20;overflow:hidden;
+    position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:20px;z-index:20;overflow:hidden;
 }
 .upload-click-area{
-    display:flex;flex-direction:column;align-items:center;justify-content:center;
-    cursor:pointer;padding:28px 36px;max-width:92%;max-height:92%;
-    border:2px dashed #3f3f46;border-radius:16px;
-    background:rgba(255,20,147,.03);transition:all .2s ease;gap:8px;text-align:center;
-    overflow:hidden;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer;
+    padding:28px 36px;max-width:92%;max-height:92%;border:2px dashed #3f3f46;border-radius:16px;
+    background:rgba(255,20,147,.03);transition:all .2s ease;gap:8px;text-align:center;overflow:hidden;
 }
 .upload-click-area:hover{background:rgba(255,20,147,.08);border-color:#FF1493;transform:scale(1.02)}
 .upload-click-area:active{background:rgba(255,20,147,.12);transform:scale(.99)}
@@ -340,26 +388,21 @@ footer{display:none!important}
 .upload-sub-text{color:#71717a;font-size:12px}
 
 .single-preview-wrap{
-    width:100%;height:100%;display:none;align-items:center;justify-content:center;padding:16px;
-    overflow:hidden;
+    width:100%;height:100%;display:none;align-items:center;justify-content:center;padding:16px;overflow:hidden;
 }
 .single-preview-card{
-    width:100%;height:100%;max-width:100%;max-height:100%;border-radius:14px;
-    overflow:hidden;border:1px solid #27272a;background:#111114;
+    width:100%;height:100%;max-width:100%;max-height:100%;border-radius:14px;overflow:hidden;border:1px solid #27272a;background:#111114;
     display:flex;align-items:center;justify-content:center;position:relative;
 }
 .single-preview-card img{
-    width:100%;height:100%;max-width:100%;max-height:100%;
-    object-fit:contain;display:block;background:#000;
+    width:100%;height:100%;max-width:100%;max-height:100%;object-fit:contain;display:block;background:#000;border:none;
 }
 .preview-overlay-actions{
     position:absolute;top:12px;right:12px;display:flex;gap:8px;z-index:5;
 }
 .preview-action-btn{
-    display:inline-flex;align-items:center;justify-content:center;
-    min-width:34px;height:34px;padding:0 12px;background:rgba(0,0,0,.65);
-    border:1px solid rgba(255,255,255,.14);border-radius:10px;cursor:pointer;
-    color:#fff!important;font-size:12px;font-weight:600;transition:all .15s ease;
+    display:inline-flex;align-items:center;justify-content:center;min-width:34px;height:34px;padding:0 12px;background:rgba(0,0,0,.65);
+    border:1px solid rgba(255,255,255,.14);border-radius:10px;cursor:pointer;color:#fff!important;font-size:12px;font-weight:600;transition:all .15s ease;
 }
 .preview-action-btn:hover{background:#FF1493;border-color:#FF1493}
 
@@ -369,14 +412,13 @@ footer{display:none!important}
 }
 .hint-bar b{color:#ff7ac7;font-weight:600}
 .hint-bar kbd{
-    display:inline-block;padding:1px 6px;background:#27272a;border:1px solid #3f3f46;
-    border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:11px;color:#a1a1aa;
+    display:inline-block;padding:1px 6px;background:#27272a;border:1px solid #3f3f46;border-radius:4px;
+    font-family:'JetBrains Mono',monospace;font-size:11px;color:#a1a1aa;
 }
 
 .examples-section{border-top:1px solid #27272a;padding:12px 16px}
 .examples-title{
-    font-size:12px;font-weight:600;color:#71717a;text-transform:uppercase;
-    letter-spacing:.8px;margin-bottom:10px;
+    font-size:12px;font-weight:600;color:#71717a;text-transform:uppercase;letter-spacing:.8px;margin-bottom:10px;
 }
 .examples-scroll{display:flex;gap:10px;overflow-x:auto;padding-bottom:8px}
 .examples-scroll::-webkit-scrollbar{height:6px}
@@ -384,43 +426,36 @@ footer{display:none!important}
 .examples-scroll::-webkit-scrollbar-thumb{background:#27272a;border-radius:3px}
 .examples-scroll::-webkit-scrollbar-thumb:hover{background:#3f3f46}
 .example-card{
-    position:relative;
-    flex-shrink:0;width:220px;background:#09090b;border:1px solid #27272a;
-    border-radius:10px;overflow:hidden;cursor:pointer;transition:all .2s ease;
+    position:relative;flex-shrink:0;width:220px;background:#09090b;border:1px solid #27272a;border-radius:10px;overflow:hidden;cursor:pointer;transition:all .2s ease;
 }
 .example-card:hover{border-color:#FF1493;transform:translateY(-2px);box-shadow:0 4px 12px rgba(255,20,147,.15)}
 .example-card.loading{opacity:.5;pointer-events:none}
 .example-thumb-wrap{height:120px;overflow:hidden;background:#18181b;position:relative}
 .example-thumb-wrap img{width:100%;height:100%;object-fit:cover}
 .example-media-chip{
-    position:absolute;top:8px;left:8px;
-    display:inline-flex;padding:3px 7px;background:rgba(0,0,0,.7);border:1px solid rgba(255,255,255,.12);
+    position:absolute;top:8px;left:8px;display:inline-flex;padding:3px 7px;background:rgba(0,0,0,.7);border:1px solid rgba(255,255,255,.12);
     border-radius:999px;font-size:10px;font-weight:700;color:#fff;letter-spacing:.5px;
 }
 .example-thumb-placeholder{
-    width:100%;height:100%;display:flex;align-items:center;justify-content:center;
-    background:#18181b;color:#3f3f46;font-size:11px;
+    width:100%;height:100%;display:flex;align-items:center;justify-content:center;background:#18181b;color:#3f3f46;font-size:11px;
 }
 .example-meta-row{padding:6px 10px;display:flex;align-items:center;gap:6px}
 .example-badge{
-    display:inline-flex;padding:2px 7px;background:rgba(255,20,147,.12);border-radius:4px;
-    font-size:10px;font-weight:600;color:#ff7ac7;font-family:'JetBrains Mono',monospace;white-space:nowrap;
+    display:inline-flex;padding:2px 7px;background:rgba(255,20,147,.12);border-radius:4px;font-size:10px;font-weight:600;color:#ff7ac7;
+    font-family:'JetBrains Mono',monospace;white-space:nowrap;
 }
 .example-prompt-text{
-    padding:0 10px 8px;font-size:11px;color:#a1a1aa;line-height:1.4;
-    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+    padding:0 10px 8px;font-size:11px;color:#a1a1aa;line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
 }
 
 .panel-card{border-bottom:1px solid #27272a}
 .panel-card-title{
-    padding:12px 20px;font-size:12px;font-weight:600;color:#71717a;
-    text-transform:uppercase;letter-spacing:.8px;border-bottom:1px solid rgba(39,39,42,.6);
+    padding:12px 20px;font-size:12px;font-weight:600;color:#71717a;text-transform:uppercase;letter-spacing:.8px;border-bottom:1px solid rgba(39,39,42,.6);
 }
 .panel-card-body{padding:16px 20px;display:flex;flex-direction:column;gap:8px}
 .modern-label{font-size:13px;font-weight:500;color:#a1a1aa;margin-bottom:4px;display:block}
 .modern-textarea{
-    width:100%;background:#09090b;border:1px solid #27272a;border-radius:8px;
-    padding:10px 14px;font-family:'Inter',sans-serif;font-size:14px;color:#e4e4e7;
+    width:100%;background:#09090b;border:1px solid #27272a;border-radius:8px;padding:10px 14px;font-family:'Inter',sans-serif;font-size:14px;color:#e4e4e7;
     resize:none;outline:none;min-height:100px;transition:border-color .2s;
 }
 .modern-textarea:focus{border-color:#FF1493;box-shadow:0 0 0 3px rgba(255,20,147,.15)}
@@ -431,10 +466,8 @@ footer{display:none!important}
 @keyframes shake{0%,100%{transform:translateX(0)}20%,60%{transform:translateX(-4px)}40%,80%{transform:translateX(4px)}}
 
 .toast-notification{
-    position:fixed;top:24px;left:50%;transform:translateX(-50%) translateY(-120%);
-    z-index:9999;padding:10px 24px;border-radius:10px;font-family:'Inter',sans-serif;
-    font-size:14px;font-weight:600;display:flex;align-items:center;gap:8px;
-    box-shadow:0 8px 24px rgba(0,0,0,.5);
+    position:fixed;top:24px;left:50%;transform:translateX(-50%) translateY(-120%);z-index:9999;padding:10px 24px;border-radius:10px;
+    font-family:'Inter',sans-serif;font-size:14px;font-weight:600;display:flex;align-items:center;gap:8px;box-shadow:0 8px 24px rgba(0,0,0,.5);
     transition:transform .35s cubic-bezier(.34,1.56,.64,1),opacity .35s ease;opacity:0;pointer-events:none;
 }
 .toast-notification.visible{transform:translateX(-50%) translateY(0);opacity:1;pointer-events:auto}
@@ -445,16 +478,12 @@ footer{display:none!important}
 .toast-notification .toast-text{line-height:1.3}
 
 .btn-run{
-    display:flex;align-items:center;justify-content:center;gap:8px;width:100%;
-    background:linear-gradient(135deg,#FF1493,#D10073);border:none;border-radius:10px;
-    padding:12px 24px;cursor:pointer;font-size:15px;font-weight:600;font-family:'Inter',sans-serif;
-    color:#ffffff!important;-webkit-text-fill-color:#ffffff!important;
-    transition:all .2s ease;letter-spacing:-.2px;
-    box-shadow:0 4px 16px rgba(255,20,147,.3),inset 0 1px 0 rgba(255,255,255,.1);
+    display:flex;align-items:center;justify-content:center;gap:8px;width:100%;background:linear-gradient(135deg,#FF1493,#D10073);border:none;border-radius:10px;
+    padding:12px 24px;cursor:pointer;font-size:15px;font-weight:600;font-family:'Inter',sans-serif;color:#ffffff!important;-webkit-text-fill-color:#ffffff!important;
+    transition:all .2s ease;letter-spacing:-.2px;box-shadow:0 4px 16px rgba(255,20,147,.3),inset 0 1px 0 rgba(255,255,255,.1);
 }
 .btn-run:hover{
-    background:linear-gradient(135deg,#ff4db2,#FF1493);transform:translateY(-1px);
-    box-shadow:0 6px 24px rgba(255,20,147,.45),inset 0 1px 0 rgba(255,255,255,.15);
+    background:linear-gradient(135deg,#ff4db2,#FF1493);transform:translateY(-1px);box-shadow:0 6px 24px rgba(255,20,147,.45),inset 0 1px 0 rgba(255,255,255,.15);
 }
 .btn-run:active{transform:translateY(0);box-shadow:0 2px 8px rgba(255,20,147,.3)}
 #custom-run-btn,#custom-run-btn *,#run-btn-label,.btn-run,.btn-run *{
@@ -462,97 +491,74 @@ footer{display:none!important}
 }
 
 .output-frame{border-bottom:1px solid #27272a;display:flex;flex-direction:column;position:relative}
-.output-frame .out-title,
-.output-frame .out-title *,
-#output-title-label{
-    color:#ffffff!important;
-    -webkit-text-fill-color:#ffffff!important;
+.output-frame .out-title,.output-frame .out-title *,#output-title-label{
+    color:#ffffff!important;-webkit-text-fill-color:#ffffff!important;
 }
 .output-frame .out-title{
-    padding:10px 20px;font-size:13px;font-weight:700;
-    text-transform:uppercase;letter-spacing:.8px;border-bottom:1px solid rgba(39,39,42,.6);
+    padding:10px 20px;font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;border-bottom:1px solid rgba(39,39,42,.6);
     display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;
 }
 .out-title-right{display:flex;gap:8px;align-items:center}
 .out-action-btn{
-    display:inline-flex;align-items:center;justify-content:center;background:rgba(255,20,147,.1);
-    border:1px solid rgba(255,20,147,.2);border-radius:6px;cursor:pointer;padding:3px 10px;
+    display:inline-flex;align-items:center;justify-content:center;background:rgba(255,20,147,.1);border:1px solid rgba(255,20,147,.2);border-radius:6px;cursor:pointer;padding:3px 10px;
     font-size:11px;font-weight:500;color:#ff7ac7!important;gap:4px;height:24px;transition:all .15s;
 }
 .out-action-btn:hover{background:rgba(255,20,147,.2);border-color:rgba(255,20,147,.35);color:#ffffff!important}
 .out-action-btn svg{width:12px;height:12px;fill:#ff7ac7}
 .output-frame .out-body{
-    flex:1;background:#09090b;display:flex;align-items:stretch;justify-content:stretch;
-    overflow:hidden;min-height:320px;position:relative;
+    flex:1;background:#09090b;display:flex;align-items:stretch;justify-content:stretch;overflow:hidden;min-height:320px;position:relative;
 }
-.output-scroll-wrap{
-    width:100%;height:100%;padding:0;overflow:hidden;
-}
+.output-scroll-wrap{width:100%;height:100%;padding:0;overflow:hidden}
 .output-textarea{
-    width:100%;height:320px;min-height:320px;max-height:320px;background:#09090b;color:#e4e4e7;
-    border:none;outline:none;padding:16px 18px;font-size:13px;line-height:1.6;
+    width:100%;height:320px;min-height:320px;max-height:320px;background:#09090b;color:#e4e4e7;border:none;outline:none;padding:16px 18px;font-size:13px;line-height:1.6;
     font-family:'JetBrains Mono',monospace;overflow:auto;resize:none;white-space:pre-wrap;
 }
 .output-textarea::placeholder{color:#52525b}
-.output-textarea.error-flash{
-    box-shadow:inset 0 0 0 2px rgba(239,68,68,.6);
-}
+.output-textarea.error-flash{box-shadow:inset 0 0 0 2px rgba(239,68,68,.6)}
 .modern-loader{
-    display:none;position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(9,9,11,.92);
-    z-index:15;flex-direction:column;align-items:center;justify-content:center;gap:16px;backdrop-filter:blur(4px);
+    display:none;position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(9,9,11,.92);z-index:15;flex-direction:column;align-items:center;justify-content:center;gap:16px;backdrop-filter:blur(4px);
 }
 .modern-loader.active{display:flex}
 .modern-loader .loader-spinner{
-    width:36px;height:36px;border:3px solid #27272a;border-top-color:#FF1493;
-    border-radius:50%;animation:spin .8s linear infinite;
+    width:36px;height:36px;border:3px solid #27272a;border-top-color:#FF1493;border-radius:50%;animation:spin .8s linear infinite;
 }
 @keyframes spin{to{transform:rotate(360deg)}}
 .modern-loader .loader-text{font-size:13px;color:#a1a1aa;font-weight:500}
 .loader-bar-track{width:200px;height:4px;background:#27272a;border-radius:2px;overflow:hidden}
 .loader-bar-fill{
-    height:100%;background:linear-gradient(90deg,#FF1493,#FF69C8,#FF1493);
-    background-size:200% 100%;animation:shimmer 1.5s ease-in-out infinite;border-radius:2px;
+    height:100%;background:linear-gradient(90deg,#FF1493,#FF69C8,#FF1493);background-size:200% 100%;animation:shimmer 1.5s ease-in-out infinite;border-radius:2px;
 }
 @keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
 
 .settings-group{border:1px solid #27272a;border-radius:10px;margin:12px 16px;padding:0;overflow:hidden}
 .settings-group-title{
-    font-size:12px;font-weight:600;color:#71717a;text-transform:uppercase;letter-spacing:.8px;
-    padding:10px 16px;border-bottom:1px solid #27272a;background:rgba(24,24,27,.5);
+    font-size:12px;font-weight:600;color:#71717a;text-transform:uppercase;letter-spacing:.8px;padding:10px 16px;border-bottom:1px solid #27272a;background:rgba(24,24,27,.5);
 }
 .settings-group-body{padding:14px 16px;display:flex;flex-direction:column;gap:12px}
 .slider-row{display:flex;align-items:center;gap:10px;min-height:28px}
 .slider-row label{font-size:13px;font-weight:500;color:#a1a1aa;min-width:118px;flex-shrink:0}
 .slider-row input[type="range"]{
-    flex:1;-webkit-appearance:none;appearance:none;height:6px;background:#27272a;
-    border-radius:3px;outline:none;min-width:0;
+    flex:1;-webkit-appearance:none;appearance:none;height:6px;background:#27272a;border-radius:3px;outline:none;min-width:0;
 }
 .slider-row input[type="range"]::-webkit-slider-thumb{
-    -webkit-appearance:none;width:16px;height:16px;background:linear-gradient(135deg,#FF1493,#D10073);
-    border-radius:50%;cursor:pointer;box-shadow:0 2px 6px rgba(255,20,147,.4);transition:transform .15s;
+    -webkit-appearance:none;width:16px;height:16px;background:linear-gradient(135deg,#FF1493,#D10073);border-radius:50%;cursor:pointer;box-shadow:0 2px 6px rgba(255,20,147,.4);transition:transform .15s;
 }
 .slider-row input[type="range"]::-webkit-slider-thumb:hover{transform:scale(1.2)}
 .slider-row input[type="range"]::-moz-range-thumb{
-    width:16px;height:16px;background:linear-gradient(135deg,#FF1493,#D10073);
-    border-radius:50%;cursor:pointer;border:none;box-shadow:0 2px 6px rgba(255,20,147,.4);
+    width:16px;height:16px;background:linear-gradient(135deg,#FF1493,#D10073);border-radius:50%;cursor:pointer;border:none;box-shadow:0 2px 6px rgba(255,20,147,.4);
 }
 .slider-row .slider-val{
-    min-width:58px;text-align:right;font-family:'JetBrains Mono',monospace;font-size:12px;
-    font-weight:500;padding:3px 8px;background:#09090b;border:1px solid #27272a;
-    border-radius:6px;color:#a1a1aa;flex-shrink:0;
+    min-width:58px;text-align:right;font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:500;padding:3px 8px;background:#09090b;border:1px solid #27272a;border-radius:6px;color:#a1a1aa;flex-shrink:0;
 }
 
 .app-statusbar{
-    background:#18181b;border-top:1px solid #27272a;padding:6px 20px;
-    display:flex;gap:12px;height:34px;align-items:center;font-size:12px;
+    background:#18181b;border-top:1px solid #27272a;padding:6px 20px;display:flex;gap:12px;height:34px;align-items:center;font-size:12px;
 }
 .app-statusbar .sb-section{
-    padding:0 12px;flex:1;display:flex;align-items:center;font-family:'JetBrains Mono',monospace;
-    font-size:12px;color:#52525b;overflow:hidden;white-space:nowrap;
+    padding:0 12px;flex:1;display:flex;align-items:center;font-family:'JetBrains Mono',monospace;font-size:12px;color:#52525b;overflow:hidden;white-space:nowrap;
 }
 .app-statusbar .sb-section.sb-fixed{
-    flex:0 0 auto;min-width:110px;text-align:center;justify-content:center;
-    padding:3px 12px;background:rgba(255,20,147,.08);border-radius:6px;color:#ff7ac7;font-weight:500;
+    flex:0 0 auto;min-width:110px;text-align:center;justify-content:center;padding:3px 12px;background:rgba(255,20,147,.08);border-radius:6px;color:#ff7ac7;font-weight:500;
 }
 
 .exp-note{padding:10px 20px;font-size:12px;color:#52525b;border-top:1px solid #27272a;text-align:center}
@@ -574,7 +580,7 @@ footer{display:none!important}
 gallery_js = r"""
 () => {
 function init() {
-    if (window.__docScopeInitDone) return;
+    if (window.__outpostInitDone) return;
 
     const dropZone = document.getElementById('media-drop-zone');
     const uploadPrompt = document.getElementById('upload-prompt');
@@ -594,7 +600,7 @@ function init() {
         return;
     }
 
-    window.__docScopeInitDone = true;
+    window.__outpostInitDone = true;
     let mediaState = null;
     let toastTimer = null;
     let examplePoller = null;
@@ -621,7 +627,6 @@ function init() {
         toast.classList.add('visible');
         toastTimer = setTimeout(() => toast.classList.remove('visible'), 3500);
     }
-    window.__showToast = showToast;
 
     function showLoader() {
         const l = document.getElementById('output-loader');
@@ -635,8 +640,16 @@ function init() {
         const sb = document.getElementById('sb-run-state');
         if (sb) sb.textContent = 'Done';
     }
-    window.__showLoader = showLoader;
+    function setRunErrorState() {
+        const l = document.getElementById('output-loader');
+        if (l) l.classList.remove('active');
+        const sb = document.getElementById('sb-run-state');
+        if (sb) sb.textContent = 'Error';
+    }
+
     window.__hideLoader = hideLoader;
+    window.__setRunErrorState = setRunErrorState;
+    window.__showToast = showToast;
 
     function flashPromptError() {
         promptInput.classList.add('error-flash');
@@ -659,23 +672,23 @@ function init() {
 
     function setGradioValue(containerId, value) {
         const container = document.getElementById(containerId);
-        if (!container) return;
-        container.querySelectorAll('input, textarea').forEach(el => {
-            if (el.type === 'file' || el.type === 'range' || el.type === 'checkbox') return;
-            const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-            const ns = Object.getOwnPropertyDescriptor(proto, 'value');
-            if (ns && ns.set) {
-                ns.set.call(el, value);
-                el.dispatchEvent(new Event('input', {bubbles:true, composed:true}));
-                el.dispatchEvent(new Event('change', {bubbles:true, composed:true}));
-            }
-        });
+        if (!container) return false;
+        const el = container.querySelector('textarea, input');
+        if (!el) return false;
+        const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        const ns = Object.getOwnPropertyDescriptor(proto, 'value');
+        if (ns && ns.set) {
+            ns.set.call(el, value);
+            el.dispatchEvent(new Event('input', {bubbles:true, composed:true}));
+            el.dispatchEvent(new Event('change', {bubbles:true, composed:true}));
+            return true;
+        }
+        return false;
     }
 
     function syncImageToGradio() {
         setGradioValue('hidden-image-b64', mediaState ? mediaState.b64 : '');
-        const txt = mediaState ? '1 image uploaded' : 'No image uploaded';
-        if (mediaStatus) mediaStatus.textContent = txt;
+        if (mediaStatus) mediaStatus.textContent = mediaState ? '1 image uploaded' : 'No image uploaded';
     }
 
     function syncPromptToGradio() {
@@ -696,18 +709,17 @@ function init() {
             return;
         }
 
-        previewImg.src = mediaState.b64;
-        previewImg.style.display = 'block';
         previewWrap.style.display = 'flex';
         if (uploadPrompt) uploadPrompt.style.display = 'none';
+        previewImg.src = mediaState.preview || mediaState.b64;
+        previewImg.style.display = 'block';
         syncImageToGradio();
     }
 
-    function setPreview(b64, name) {
-        mediaState = {b64, name: name || 'file'};
+    function setPreviewFromFileReader(b64, name) {
+        mediaState = {b64, name: name || 'file', mode: 'image'};
         renderPreview();
     }
-    window.__setPreview = setPreview;
 
     function clearPreview() {
         mediaState = null;
@@ -722,7 +734,7 @@ function init() {
             return;
         }
         const reader = new FileReader();
-        reader.onload = (e) => setPreview(e.target.result, file.name);
+        reader.onload = (e) => setPreviewFromFileReader(e.target.result, file.name);
         reader.readAsDataURL(file);
     }
 
@@ -758,6 +770,7 @@ function init() {
         });
         syncModelToGradio(name);
     }
+
     window.__activateModelTab = activateModelTab;
 
     document.querySelectorAll('.model-tab[data-model]').forEach(btn => {
@@ -794,18 +807,13 @@ function init() {
 
     function validateBeforeRun() {
         const promptVal = promptInput.value.trim();
-        if (!mediaState && !promptVal) {
-            showToast('Please upload an image and enter your instruction', 'error');
+        if (!promptVal) {
+            showToast('Please enter your instruction', 'warning');
             flashPromptError();
             return false;
         }
         if (!mediaState) {
             showToast('Please upload an image', 'error');
-            return false;
-        }
-        if (!promptVal) {
-            showToast('Please enter your instruction', 'warning');
-            flashPromptError();
             return false;
         }
         const currentModel = (document.querySelector('.model-tab.active') || {}).dataset?.model;
@@ -826,7 +834,12 @@ function init() {
         showLoader();
         setTimeout(() => {
             const gradioBtn = document.getElementById('gradio-run-btn');
-            if (!gradioBtn) return;
+            if (!gradioBtn) {
+                setRunErrorState();
+                if (outputArea) outputArea.value = '[ERROR] Run button not found.';
+                showToast('Run button not found', 'error');
+                return;
+            }
             const btn = gradioBtn.querySelector('button');
             if (btn) btn.click(); else gradioBtn.click();
         }, 180);
@@ -878,22 +891,26 @@ function init() {
     function applyExamplePayload(raw) {
         try {
             const data = JSON.parse(raw);
-            if (data.status === 'ok') {
-                if (data.media) setPreview(data.media, data.name || 'example_file');
-                if (data.query) {
-                    promptInput.value = data.query;
-                    syncPromptToGradio();
-                }
-                if (data.model) activateModelTab(data.model);
-                document.querySelectorAll('.example-card.loading').forEach(c => c.classList.remove('loading'));
-                showToast('Example loaded', 'info');
-            } else if (data.status === 'error') {
-                document.querySelectorAll('.example-card.loading').forEach(c => c.classList.remove('loading'));
-                showToast(data.message || 'Failed to load example', 'error');
+            if (data.status !== 'ok') return;
+
+            if (data.model) activateModelTab(data.model);
+            if (data.query) {
+                promptInput.value = data.query;
+                syncPromptToGradio();
             }
+
+            mediaState = {
+                b64: data.media || '',
+                preview: data.media || '',
+                name: data.name || 'example_file',
+                mode: 'image'
+            };
+            renderPreview();
+
+            document.querySelectorAll('.example-card.loading').forEach(c => c.classList.remove('loading'));
+            showToast('Example loaded', 'info');
         } catch (e) {
             document.querySelectorAll('.example-card.loading').forEach(c => c.classList.remove('loading'));
-            showToast('Failed to parse example data', 'error');
         }
     }
 
@@ -910,33 +927,54 @@ function init() {
                 applyExamplePayload(current);
                 return;
             }
-            if (attempts >= 80) {
+            if (attempts >= 100) {
                 clearInterval(examplePoller);
                 examplePoller = null;
                 document.querySelectorAll('.example-card.loading').forEach(c => c.classList.remove('loading'));
                 showToast('Example load timed out', 'error');
             }
-        }, 150);
+        }, 120);
+    }
+
+    function triggerExampleLoad(idx) {
+        const btnWrap = document.getElementById('example-load-btn');
+        const btn = btnWrap ? (btnWrap.querySelector('button') || btnWrap) : null;
+        if (!btn) return;
+
+        let attempts = 0;
+
+        function writeIdxAndClick() {
+            attempts += 1;
+
+            const ok1 = setGradioValue('example-idx-input', String(idx));
+            setGradioValue('example-result-data', '');
+            const currentVal = getValueFromContainer('example-idx-input');
+
+            if (ok1 && currentVal === String(idx)) {
+                btn.click();
+                startExamplePolling();
+                return;
+            }
+
+            if (attempts < 30) {
+                setTimeout(writeIdxAndClick, 100);
+            } else {
+                document.querySelectorAll('.example-card.loading').forEach(c => c.classList.remove('loading'));
+                showToast('Failed to initialize example loader', 'error');
+            }
+        }
+
+        writeIdxAndClick();
     }
 
     document.querySelectorAll('.example-card[data-idx]').forEach(card => {
         card.addEventListener('click', () => {
             const idx = card.getAttribute('data-idx');
+            if (idx === null || idx === undefined || idx === '') return;
             document.querySelectorAll('.example-card.loading').forEach(c => c.classList.remove('loading'));
             card.classList.add('loading');
             showToast('Loading example...', 'info');
-
-            setGradioValue('example-result-data', '');
-            setGradioValue('example-idx-input', idx);
-
-            setTimeout(() => {
-                const btn = document.getElementById('example-load-btn');
-                if (btn) {
-                    const b = btn.querySelector('button');
-                    if (b) b.click(); else btn.click();
-                }
-                startExamplePolling();
-            }, 220);
+            triggerExampleLoad(idx);
         });
     });
 
@@ -944,14 +982,13 @@ function init() {
     if (observerTarget) {
         const obs = new MutationObserver(() => {
             const current = getValueFromContainer('example-result-data');
-            if (current && current !== lastSeenExamplePayload) {
-                lastSeenExamplePayload = current;
-                if (examplePoller) {
-                    clearInterval(examplePoller);
-                    examplePoller = null;
-                }
-                applyExamplePayload(current);
+            if (!current || current === lastSeenExamplePayload) return;
+            lastSeenExamplePayload = current;
+            if (examplePoller) {
+                clearInterval(examplePoller);
+                examplePoller = null;
             }
+            applyExamplePayload(current);
         });
         obs.observe(observerTarget, {childList:true, subtree:true, characterData:true, attributes:true});
     }
@@ -974,6 +1011,10 @@ function watchOutputs() {
 
     let lastText = '';
 
+    function isErrorText(val) {
+        return typeof val === 'string' && val.trim().startsWith('[ERROR]');
+    }
+
     function syncOutput() {
         const el = resultContainer.querySelector('textarea') || resultContainer.querySelector('input');
         if (!el) return;
@@ -982,7 +1023,15 @@ function watchOutputs() {
             lastText = val;
             outArea.value = val;
             outArea.scrollTop = outArea.scrollHeight;
-            if (window.__hideLoader && val.trim()) window.__hideLoader();
+
+            if (val.trim()) {
+                if (isErrorText(val)) {
+                    if (window.__setRunErrorState) window.__setRunErrorState();
+                    if (window.__showToast) window.__showToast('Inference failed', 'error');
+                } else {
+                    if (window.__hideLoader) window.__hideLoader();
+                }
+            }
         }
     }
 
@@ -1057,7 +1106,7 @@ with gr.Blocks() as demo:
                         <div id="upload-click-area" class="upload-click-area">
                             {UPLOAD_PREVIEW_SVG}
                             <span id="upload-main-text" class="upload-main-text">Click or drag an image here</span>
-                            <span id="upload-sub-text" class="upload-sub-text">Upload one document, page, screenshot, receipt, or scene image for OCR and reasoning</span>
+                            <span id="upload-sub-text" class="upload-sub-text">Upload one image for OCR and multimodal reasoning</span>
                         </div>
                     </div>
 
@@ -1075,8 +1124,8 @@ with gr.Blocks() as demo:
                 </div>
 
                 <div class="hint-bar">
-                    <b>Upload:</b> Click or drag an image into the panel &nbsp;&middot;&nbsp;
-                    <b>Model:</b> Change models from the header &nbsp;&middot;&nbsp;
+                    <b>Mode:</b> Image inference only &nbsp;&middot;&nbsp;
+                    <b>Model:</b> Switch between OCR, captioning, and reasoning variants &nbsp;&middot;&nbsp;
                     <kbd>Clear</kbd> removes the current image
                 </div>
 
@@ -1090,10 +1139,10 @@ with gr.Blocks() as demo:
 
             <div class="app-main-right">
                 <div class="panel-card">
-                    <div class="panel-card-title">Vision / OCR Instruction</div>
+                    <div id="instruction-title" class="panel-card-title">Vision / OCR Instruction</div>
                     <div class="panel-card-body">
-                        <label class="modern-label" for="custom-query-input">Query Input</label>
-                        <textarea id="custom-query-input" class="modern-textarea" rows="4" placeholder="e.g., perform OCR on this image, describe the document, identify visible text, analyze the scene..."></textarea>
+                        <label id="query-label" class="modern-label" for="custom-query-input">Query Input</label>
+                        <textarea id="custom-query-input" class="modern-textarea" rows="4" placeholder="e.g., perform OCR, describe the image, analyze the scene, extract visible text..."></textarea>
                     </div>
                 </div>
 
@@ -1162,7 +1211,7 @@ with gr.Blocks() as demo:
         </div>
 
         <div class="exp-note">
-            Experimental document vision suite &middot; Open on <a href="https://github.com/PRITHIVSAKTHIUR/DocScope-R1" target="_blank">GitHub</a>
+            Experimental document vision workspace
         </div>
 
         <div class="app-statusbar">
@@ -1178,7 +1227,7 @@ with gr.Blocks() as demo:
     demo.load(fn=noop, inputs=None, outputs=None, js=wire_outputs_js)
 
     run_btn.click(
-        fn=run_inference,
+        fn=run_router,
         inputs=[
             hidden_model_name,
             prompt,
@@ -1216,7 +1265,7 @@ with gr.Blocks() as demo:
     )
 
 if __name__ == "__main__":
-    demo.queue(max_size=30).launch(
+    demo.queue(max_size=50).launch(
         css=css,
         mcp_server=True,
         ssr_mode=False,
